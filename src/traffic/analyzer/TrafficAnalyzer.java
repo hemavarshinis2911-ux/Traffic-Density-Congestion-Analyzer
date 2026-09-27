@@ -1,0 +1,309 @@
+package traffic.analyzer;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.opencv.core.MatOfRect2d;
+import org.opencv.core.Rect2d;
+import org.opencv.core.Core;
+import org.opencv.core.Mat;
+import org.opencv.core.MatOfFloat;
+import org.opencv.core.MatOfInt;
+import org.opencv.core.Rect;
+import org.opencv.core.Scalar;
+import org.opencv.dnn.Dnn;
+import org.opencv.dnn.Net;
+import org.opencv.imgcodecs.Imgcodecs;
+import org.opencv.imgproc.Imgproc;
+
+public class TrafficAnalyzer {
+
+	public static TrafficResult analyzeTraffic(String imagePath) {
+
+        // Load OpenCV
+        System.loadLibrary(Core.NATIVE_LIBRARY_NAME);
+
+        // -----------------------------
+        // 1. Load traffic image
+        // -----------------------------
+        Mat image = Imgcodecs.imread(imagePath);
+
+        if (image.empty()) {
+            System.out.println("❌ Traffic image could not be loaded.");
+            return null;
+        }
+
+        System.out.println("✅ Traffic image loaded successfully!");
+
+        // -----------------------------
+        // 2. Load YOLO model
+        // -----------------------------
+        String modelPath = "models/yolov5s.onnx";
+
+        Net net = Dnn.readNetFromONNX(modelPath);
+
+        if (net.empty()) {
+            System.out.println("❌ YOLO model could not be loaded.");
+            return null;
+        }
+
+        System.out.println("✅ YOLO model loaded successfully!");
+
+        // -----------------------------
+        // 3. Prepare image for YOLO
+        // -----------------------------
+        Mat blob = Dnn.blobFromImage(
+                image,
+                1.0 / 255.0,
+                new org.opencv.core.Size(640, 640),
+                new Scalar(0, 0, 0),
+                true,
+                false
+        );
+
+        net.setInput(blob);
+
+        // -----------------------------
+        // 4. Run YOLO detection
+        // -----------------------------
+        Mat output = net.forward();
+        System.out.println("YOLO output rows: " + output.rows());
+        System.out.println("YOLO output cols: " + output.cols());
+        System.out.println("YOLO output dimensions: " + output.dims());
+        for (int i = 0; i < output.dims(); i++) {
+            System.out.println("Dimension " + i + ": " + output.size(i));
+        }
+
+        System.out.println("✅ YOLO detection completed!");
+
+        // -----------------------------
+     // -----------------------------
+     // 5. Detection settings
+     // -----------------------------
+     float confidenceThreshold = 0.40f;
+     float nmsThreshold = 0.45f;
+
+     List<Rect> boxes = new ArrayList<>();
+     List<Float> confidences = new ArrayList<>();
+     List<Integer> classIds = new ArrayList<>();
+
+     // YOLOv5 output shape:
+     // 1 x 25200 x 85
+
+  // Convert YOLO 3D output into a 2D matrix
+     Mat detections = output.reshape(1, 25200);
+
+     int rows = detections.rows();
+     int cols = detections.cols();
+
+     for (int i = 0; i < rows; i++) {
+
+         float[] data = new float[cols];
+
+         detections.get(i, 0, data);
+
+         float objectConfidence = (float) data[4];
+
+         if (objectConfidence < confidenceThreshold) {
+             continue;
+         }
+
+         // Find the class with the highest score
+         float maxClassScore = 0;
+         int classId = -1;
+
+         for (int j = 5; j < cols; j++) {
+
+             float classScore = (float) data[j];
+
+             if (classScore > maxClassScore) {
+                 maxClassScore = classScore;
+                 classId = j - 5;
+             }
+         }
+
+         float confidence = objectConfidence * maxClassScore;
+         System.out.println("Detected class: " + classId + "  Confidence: " + confidence);
+
+         if (confidence < confidenceThreshold) {
+             continue;
+         }
+
+         // COCO classes:
+         // 2 = car
+         // 3 = motorcycle
+         // 5 = bus
+         // 7 = truck
+
+         if (classId != 2 &&
+             classId != 3 &&
+             classId != 5 &&
+             classId != 7) {
+             continue;
+         }
+
+         float centerX = (float) data[0];
+         float centerY = (float) data[1];
+         float width = (float) data[2];
+         float height = (float) data[3];
+
+         int x = (int) ((centerX - width / 2) * image.cols() / 640);
+         int y = (int) ((centerY - height / 2) * image.rows() / 640);
+
+         int w = (int) (width * image.cols() / 640);
+         int h = (int) (height * image.rows() / 640);
+
+         boxes.add(new Rect(x, y, w, h));
+         confidences.add(confidence);
+         classIds.add(classId);
+     }
+        // 6. Remove duplicate boxes
+        // -----------------------------
+        MatOfInt indices = new MatOfInt();
+
+        MatOfFloat confidenceMat = new MatOfFloat();
+
+        float[] confidenceArray = new float[confidences.size()];
+
+        for (int i = 0; i < confidences.size(); i++) {
+            confidenceArray[i] = confidences.get(i);
+        }
+
+        confidenceMat.fromArray(confidenceArray);
+
+        MatOfRect2d boxesMat = new MatOfRect2d();
+
+        Rect2d[] rect2dArray = new Rect2d[boxes.size()];
+
+        for (int i = 0; i < boxes.size(); i++) {
+            Rect r = boxes.get(i);
+
+            rect2dArray[i] = new Rect2d(
+                    r.x,
+                    r.y,
+                    r.width,
+                    r.height
+            );
+        }
+
+        boxesMat.fromArray(rect2dArray);
+
+        Dnn.NMSBoxes(
+                boxesMat,
+                confidenceMat,
+                confidenceThreshold,
+                nmsThreshold,
+                indices
+        );
+
+        // -----------------------------
+        // 7. Count vehicles
+        // -----------------------------
+        int carCount = 0;
+        int motorcycleCount = 0;
+        int busCount = 0;
+        int truckCount = 0;
+
+        int[] selectedIndices = indices.empty()
+                ? new int[0]
+                : indices.toArray();
+
+        for (int index : selectedIndices) {
+
+            int classId = classIds.get(index);
+
+            if (classId == 2) {
+                carCount++;
+            } else if (classId == 3) {
+                motorcycleCount++;
+            } else if (classId == 5) {
+                busCount++;
+            } else if (classId == 7) {
+                truckCount++;
+            }
+
+            // Draw bounding box
+            Rect box = boxes.get(index);
+
+            Imgproc.rectangle(
+                    image,
+                    box,
+                    new Scalar(0, 255, 0),
+                    2
+            );
+        }
+
+        int totalVehicles =
+                carCount +
+                motorcycleCount +
+                busCount +
+                truckCount;
+
+        // -----------------------------
+        // 8. Display result
+        // -----------------------------
+        System.out.println();
+        System.out.println("======================================");
+        System.out.println(" TRAFFIC DENSITY & CONGESTION ANALYZER");
+        System.out.println("======================================");
+        System.out.println("Cars          : " + carCount);
+        System.out.println("Motorcycles   : " + motorcycleCount);
+        System.out.println("Buses         : " + busCount);
+        System.out.println("Trucks        : " + truckCount);
+        System.out.println("--------------------------------------");
+        System.out.println("Total Vehicles: " + totalVehicles);
+
+        // -----------------------------
+        // 9. Traffic level
+        // -----------------------------
+        if (totalVehicles <= 5) {
+
+            System.out.println("Traffic Level : LOW 🟢");
+            System.out.println("Status        : Traffic Flow Normal");
+
+        } else if (totalVehicles <= 15) {
+
+            System.out.println("Traffic Level : MODERATE 🟡");
+            System.out.println("Status        : Traffic Increasing");
+
+        } else {
+
+            System.out.println("Traffic Level : HIGH 🔴");
+            System.out.println("Status        : Congestion Detected");
+        }
+
+        System.out.println("======================================");
+
+        // -----------------------------
+        // 10. Save detected image
+        // -----------------------------
+        String resultPath = "images/traffic_result.jpg";
+
+        Imgcodecs.imwrite(resultPath, image);
+
+        System.out.println();
+        System.out.println("✅ Result image saved:");
+        System.out.println(resultPath);
+        TrafficResult result = new TrafficResult();
+
+        result.carCount = carCount;
+        result.motorcycleCount = motorcycleCount;
+        result.busCount = busCount;
+        result.truckCount = truckCount;
+        result.totalVehicles = totalVehicles;
+        result.resultImagePath = resultPath;
+
+        if (totalVehicles <= 5) {
+            result.trafficLevel = "LOW 🟢";
+            result.status = "Traffic Flow Normal";
+        } else if (totalVehicles <= 15) {
+            result.trafficLevel = "MODERATE 🟡";
+            result.status = "Traffic Increasing";
+        } else {
+            result.trafficLevel = "HIGH 🔴";
+            result.status = "Congestion Detected";
+        }
+
+        return result;
+    }
+} 
